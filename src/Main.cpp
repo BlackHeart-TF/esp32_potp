@@ -28,32 +28,36 @@
 #include "TOTP.h"
 #include "lwip/err.h"
 #include "apps/sntp/sntp.h"
+#include <base64.h>
 
+/**************************   USER VARS   **********************************/
 // firmware version from git rev-list command
-String VERSION_CODE = "rev";
+String VERSION_CODE = "v";
 #ifdef SRC_REV
 int VCODE = SRC_REV;
 #else
 int VCODE = 0;
 #endif
-// OTP setup ==> test code (from GoogleAuth)
-uint8_t hmacKey[] = {0xea,0x41,0x68,0x5c,0x9b,0x10,0x13,0x5d,0x8c,0xa0,0x35,0x05,0x38,0xcb,0xa9,0x96,0x75,0xa0,0x5a,0xaf};
-TOTP totp = TOTP(hmacKey, 20);
+
+const char* base32String = "JBSWY3DPEHPK3PXP";
+
+SSD1306Wire display(0x3c, 25, 26); //set pins for the OLED display using Wire library
+
+#define SLEEP_TIMEOUT 15000
+
+/**************************   STATIC INITIALIZERS   **********************************/
+TOTP* totp;
 char code[7];
-// Initialize the OLED display using Wire library
-SSD1306Wire display(0x3c, 5, 4);
+unsigned long lastActivityTime = 0; // Stores the last activity time
+
 WiFiManager wifi(&display);
 // Power vars
 unsigned long poweroff = 0;
 bool isPowerOff = false;
 // Touche keys setup
-#define THRESHOLD 80
-bool touch2detected = false;
-bool touch3detected = false;
+#define THRESHOLD 75
 int touch2count = 0;
 int touch3count = 0;
-void gotTouch2(){ touch2detected = true; }
-void gotTouch3(){ touch3detected = true; }
 
 /**************************   POWER METHODS   **********************************/
 
@@ -102,6 +106,74 @@ static void getTimeFromSNTP(void) {
   Serial.println("ready.");
 }
 
+/****************************** KEY HANDLING **********************************/
+
+size_t base32Decode(const char* encoded, uint8_t* decoded, size_t maxDecodedLen) {
+  size_t inputLength = strlen(encoded);
+  if (inputLength % 8 != 0) {
+    // Base32 length should be multiple of 8
+    return 0;
+  }
+
+  size_t outputLength = inputLength * 5 / 8;
+  if (outputLength > maxDecodedLen) {
+    // Output buffer is too small
+    return 0;
+  }
+
+  size_t decodedIndex = 0;
+  for (size_t i = 0; i < inputLength; i += 8) {
+    uint32_t buffer = 0;
+
+    for (size_t j = 0; j < 8; ++j) {
+      buffer <<= 5;
+
+      if (encoded[i + j] >= 'A' && encoded[i + j] <= 'Z') {
+        buffer |= encoded[i + j] - 'A';
+      } else if (encoded[i + j] >= '2' && encoded[i + j] <= '7') {
+        buffer |= encoded[i + j] - '2' + 26;
+      } else {
+        // Invalid character in input
+        return 0;
+      }
+    }
+
+    for (size_t j = 0; j < 5; ++j) {
+      if (decodedIndex < outputLength) {
+        decoded[decodedIndex++] = (buffer >> (24 - j * 8)) & 0xFF;
+      }
+    }
+  }
+
+  return decodedIndex;
+}
+
+TOTP DecodeKey(const char* encoded) {
+ size_t decodedLen = strlen(encoded) * 5 / 8;
+
+  // Allocate memory for the decoded key
+  uint8_t* hmacKey = new uint8_t[decodedLen];//{0xea,0x41,0x68,0x5c,0x9b,0x10,0x13,0x5d,0x8c,0xa0,0x35,0x05,0x38,0xcb,0xa9,0x96,0x75,0xa0,0x5a,0xaf};
+  
+  // Decode the base32 encoded key
+  size_t actualDecodedLen = base32Decode(encoded, hmacKey, decodedLen);
+  if (actualDecodedLen > 0) {
+    Serial.println("Decoded Bytes:");
+    for (size_t i = 0; i < actualDecodedLen; i++) {
+      // Print each byte in hexadecimal format
+      if (hmacKey[i] < 16) {
+        Serial.print("0"); // Print leading zero for values less than 0x10
+      }
+      Serial.print(hmacKey[i], HEX);
+      Serial.print(" "); // Separate bytes for readability
+    }
+  } else {
+    Serial.println("Decoding failed or buffer too small.");
+  }
+  Serial.print(actualDecodedLen);
+  TOTP totp = TOTP(hmacKey, actualDecodedLen);
+  return totp;
+}
+
 /************************** DISPLAY HANDLING **********************************/
 
 void showWelcome(){
@@ -109,7 +181,7 @@ void showWelcome(){
   display.clear();
   display.setTextAlignment(TEXT_ALIGN_CENTER_BOTH);
   display.setFont(ArialMT_Plain_16);
-  display.drawString(display.getWidth()/2, display.getHeight()/2, "ESP32 POTP");
+  display.drawString(display.getWidth()/2, display.getHeight()/2, "ESP-2FA");
   display.display();
   Serial.println("-->Welcome screen ready");
   delay(500); // TODO: remove if bluetooth will be scan
@@ -136,7 +208,7 @@ void calcOTPCodeAndPrintScreen() {
   time_t now;
   struct tm timeinfo;
   char timebuf[64];
-  char *newCode = totp.getCode(time(&now));
+  char *newCode = totp->getCode(time(&now));
   localtime_r(&now, &timeinfo);
   strftime(timebuf, sizeof(timebuf),"%Y %a, %d %b %H:%M:%S", &timeinfo);
   if (strcmp(code, newCode) != 0) {
@@ -169,6 +241,7 @@ void setup() {
   Serial.begin(115200);
   Serial.println();
   Serial.println("== ESP32 Booting ==");
+  lastActivityTime = millis();
   // display setup
   display.init();
   display.flipScreenVertically();
@@ -177,12 +250,15 @@ void setup() {
   Serial.println("-->OLED ready");
   wifi.disableWifi();
   // Init touch callbacks
-  touchAttachInterrupt(T2, gotTouch2, THRESHOLD);
-  touchAttachInterrupt(T3, gotTouch3, THRESHOLD);
+  pinMode(T4, INPUT);
+  pinMode(T3, INPUT);
+  touchAttachInterrupt(T4,[](){},75);
   Serial.println("-->Buttons ready");
   // Set timezone for America/Bogota
   setenv("TZ", "<-05>5", 1);
   tzset();
+  TOTP ntotp = DecodeKey(base32String);
+  totp = &ntotp;
   // Splash Window
   showWelcome();
   Serial.println("== Setup ready ==");
@@ -198,10 +274,11 @@ void loop() {
   else                   // OTPcode mode
     calcOTPCodeAndPrintScreen();
 
+ int touch2Value = touchRead(T4);
   // touch LEFT capture
-  if (touch2detected) {
-    touch2detected = false;
+  if (touch2Value < THRESHOLD) {
     if (touch2count++ > 10) {
+      lastActivityTime = millis();
       Serial.println("Touch 2 (GPIO2) reached");
       touch2count = 0;
       if (isPowerOff)
@@ -210,10 +287,14 @@ void loop() {
         suspend();
     }
   }
+  else
+    touch2count = 0;
+
   // touch RIGTH capture
-  if (touch3detected) {
-    touch3detected = false;
+  int touch3Value = touchRead(T3);
+  if (touch3Value < THRESHOLD) {
     if (touch3count++ > 5) {
+      lastActivityTime = millis();
       Serial.println("Touch 3 (GPIO15) reached");
       touch3count = 0;
       if (wifi.isWifiEnable) wifi.disableWifi();
@@ -221,4 +302,15 @@ void loop() {
       delay(200);
     }
   }
+  else
+    touch3count = 0;
+
+  if (millis() - lastActivityTime >= SLEEP_TIMEOUT) {
+    Serial.println("No activity detected for 5 seconds. Going to deep sleep.");
+    delay(100); // Short delay to ensure the Serial message is sent before sleeping
+
+    // Enter deep sleep
+    suspend();
+  }
+  delay(10);
 }
