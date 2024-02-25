@@ -41,7 +41,7 @@ int VCODE = 0;
 
 const char* base32String = "JBSWY3DPEHPK3PXP";
 
-SSD1306Wire display(0x3c, 25, 26); //set pins for the OLED display using Wire library
+SSD1306Wire display(0x3c, 21, 22); //set pins for the OLED display using Wire library
 
 #define SLEEP_TIMEOUT 15000
 
@@ -109,67 +109,65 @@ static void getTimeFromSNTP(void) {
 /****************************** KEY HANDLING **********************************/
 
 size_t base32Decode(const char* encoded, uint8_t* decoded, size_t maxDecodedLen) {
-  size_t inputLength = strlen(encoded);
-  if (inputLength % 8 != 0) {
-    // Base32 length should be multiple of 8
-    return 0;
-  }
-
-  size_t outputLength = inputLength * 5 / 8;
-  if (outputLength > maxDecodedLen) {
-    // Output buffer is too small
-    return 0;
-  }
-
-  size_t decodedIndex = 0;
-  for (size_t i = 0; i < inputLength; i += 8) {
-    uint32_t buffer = 0;
-
-    for (size_t j = 0; j < 8; ++j) {
-      buffer <<= 5;
-
-      if (encoded[i + j] >= 'A' && encoded[i + j] <= 'Z') {
-        buffer |= encoded[i + j] - 'A';
-      } else if (encoded[i + j] >= '2' && encoded[i + j] <= '7') {
-        buffer |= encoded[i + j] - '2' + 26;
-      } else {
-        // Invalid character in input
+    size_t inputLength = strlen(encoded);
+    if (inputLength % 8 != 0) {
+        // Base32 length should be a multiple of 8
         return 0;
-      }
     }
 
-    for (size_t j = 0; j < 5; ++j) {
-      if (decodedIndex < outputLength) {
-        decoded[decodedIndex++] = (buffer >> (24 - j * 8)) & 0xFF;
-      }
+    size_t outputLength = inputLength * 5 / 8;
+    if (outputLength > maxDecodedLen) {
+        // Output buffer is too small
+        return 0;
     }
-  }
 
-  return decodedIndex;
+    const char base32Chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    size_t decodedIndex = 0, buffer = 0, bitsLeft = 0;
+    for (size_t i = 0; i < inputLength; ++i) {
+        char c = encoded[i];
+        size_t value;
+
+        if (c >= 'A' && c <= 'Z') value = c - 'A';
+        else if (c >= '2' && c <= '7') value = c - '2' + 26;
+        else return 0; // Invalid character
+
+        buffer = (buffer << 5) | value;
+        bitsLeft += 5;
+
+        if (bitsLeft >= 8) {
+            decoded[decodedIndex++] = (buffer >> (bitsLeft - 8)) & 0xFF;
+            bitsLeft -= 8;
+        }
+    }
+
+    return decodedIndex;
 }
 
 TOTP DecodeKey(const char* encoded) {
  size_t decodedLen = strlen(encoded) * 5 / 8;
 
   // Allocate memory for the decoded key
-  uint8_t* hmacKey = new uint8_t[decodedLen];//{0xea,0x41,0x68,0x5c,0x9b,0x10,0x13,0x5d,0x8c,0xa0,0x35,0x05,0x38,0xcb,0xa9,0x96,0x75,0xa0,0x5a,0xaf};
+  uint8_t* hmacKey = new uint8_t[decodedLen];
   
   // Decode the base32 encoded key
   size_t actualDecodedLen = base32Decode(encoded, hmacKey, decodedLen);
+  //hmacKey = new uint8_t[10]{'H','e','l','l','o','!',0xde,0xad,0xbe,0xef};
+
   if (actualDecodedLen > 0) {
-    Serial.println("Decoded Bytes:");
-    for (size_t i = 0; i < actualDecodedLen; i++) {
-      // Print each byte in hexadecimal format
-      if (hmacKey[i] < 16) {
-        Serial.print("0"); // Print leading zero for values less than 0x10
-      }
-      Serial.print(hmacKey[i], HEX);
-      Serial.print(" "); // Separate bytes for readability
-    }
+  //   Serial.println("Decoded Bytes:");
+  //   for (size_t i = 0; i < actualDecodedLen; i++) {
+  //     Serial.print("Index: ");Serial.println(i);
+  //     // Print each byte in hexadecimal format
+  //     if (hmacKey[i] < 16) {
+  //       Serial.print("0"); // Print leading zero for values less than 0x10
+  //     }
+  //     Serial.print(hmacKey[i], HEX);
+  //     Serial.print(" "); // Separate bytes for readability
+  //   }
   } else {
     Serial.println("Decoding failed or buffer too small.");
   }
-  Serial.print(actualDecodedLen);
+  //Serial.print(actualDecodedLen);
   TOTP totp = TOTP(hmacKey, actualDecodedLen);
   return totp;
 }
