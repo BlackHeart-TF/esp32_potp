@@ -19,6 +19,7 @@
 
 #include <Arduino.h>
 #include <SSD1306.h>
+
 #include <sys/time.h>
 #include <string.h>
 #include <time.h>
@@ -29,9 +30,13 @@
 #include "lwip/err.h"
 #include "apps/sntp/sntp.h"
 #include <base64.h>
+#include "font_spaceage.h"
 
 /**************************   USER VARS   **********************************/
 // firmware version from git rev-list command
+
+#define DPAD_PIN A0
+
 String VERSION_CODE = "v";
 #ifdef SRC_REV
 int VCODE = SRC_REV;
@@ -41,9 +46,11 @@ int VCODE = 0;
 
 const char* base32String = "JBSWY3DPEHPK3PXP";
 
-SSD1306Wire display(0x3c, 21, 22); //set pins for the OLED display using Wire library
+SSD1306Wire display(0x3c,21,22); //set pins for the OLED display using Wire library
 
 #define SLEEP_TIMEOUT 15000
+
+#define KEY_REPEAT_INTERVAL 500 // Repeat interval in milliseconds
 
 /**************************   STATIC INITIALIZERS   **********************************/
 TOTP* totp;
@@ -59,6 +66,9 @@ bool isPowerOff = false;
 int touch2count = 0;
 int touch3count = 0;
 
+unsigned long lastPressTime = 0; // Timestamp of the last press event
+String lastDirection = "Idle"; // The last direction that was pressed
+
 /**************************   POWER METHODS   **********************************/
 
 void reboot(){
@@ -71,6 +81,9 @@ void suspend(){
   isPowerOff=true;
   display.clear();
   display.setFont(ArialMT_Plain_10);
+  int16_t x1, y1;
+  uint16_t w, h;
+  const char* text = "Suspending..";
   display.setTextAlignment(TEXT_ALIGN_CENTER_BOTH);
   display.drawString(display.getWidth()/2, display.getHeight()/2, "Suspending..");
   display.display();
@@ -104,6 +117,33 @@ static void getTimeFromSNTP(void) {
     localtime_r(&now, &timeinfo);
   }
   Serial.println("ready.");
+}
+
+/****************************** DPAD HANDLING **********************************/
+
+String processDpadPress() {
+    // Define direction based on sensorValue as before
+    int sensorValue = analogRead(DPAD_PIN);
+    if(sensorValue == 4095) return "Idle";
+    else if(sensorValue < 100) return "Down";
+    else if(sensorValue > 650 && sensorValue < 730) return "Left";
+    else if(sensorValue > 1450 && sensorValue < 1610) return "Up";
+    else if(sensorValue > 3140 && sensorValue < 3340) return "Right";
+    else return "Unknown";
+}
+
+void sendDirectionEvent(String direction) {
+    unsigned long currentTime = millis(); // Get the current time
+    if (direction == "Idle") {
+        // Reset when no direction is pressed
+        //lastPressTime = 0;
+        //lastDirection = "Idle";
+    } else if (direction != lastDirection || (currentTime - lastPressTime >= KEY_REPEAT_INTERVAL && lastPressTime != 0)) {
+        // Send event if a new direction is pressed or if the repeat interval has passed
+        //Serial.println(direction);
+        //lastPressTime = currentTime; // Update the last press time
+        //lastDirection = direction; // Update the last direction
+    }
 }
 
 /****************************** KEY HANDLING **********************************/
@@ -178,7 +218,7 @@ void showWelcome(){
   isPowerOff=false;
   display.clear();
   display.setTextAlignment(TEXT_ALIGN_CENTER_BOTH);
-  display.setFont(ArialMT_Plain_16);
+  display.setFont(ArialMT_Plain_10);
   display.drawString(display.getWidth()/2, display.getHeight()/2, "ESP-2FA");
   display.display();
   Serial.println("-->Welcome screen ready");
@@ -302,6 +342,10 @@ void loop() {
   }
   else
     touch3count = 0;
+
+  String direction = processDpadPress();
+  Serial.print(direction);
+  sendDirectionEvent(direction);
 
   if (millis() - lastActivityTime >= SLEEP_TIMEOUT) {
     Serial.println("No activity detected for 5 seconds. Going to deep sleep.");
